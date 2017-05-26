@@ -19,7 +19,6 @@ import com.github.jcustenborder.kafka.connect.cdc.CachingTableMetadataProvider;
 import com.github.jcustenborder.kafka.connect.cdc.Change;
 import com.github.jcustenborder.kafka.connect.cdc.ChangeKey;
 import com.github.jcustenborder.kafka.connect.cdc.JdbcUtils;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
@@ -53,6 +52,8 @@ class MsSqlTableMetadataProvider extends CachingTableMetadataProvider {
       "WHERE " +
       "SCHEMA_NAME(OBJECTPROPERTY(object_id, 'SchemaId')) = ? AND " +
       "OBJECT_NAME(object_id) = ?";
+  final static String CURRENT_VERSION_SQL = "SELECT CHANGE_TRACKING_CURRENT_VERSION() AS [current_version]";
+  final static String MIN_VALID_VERSION_SQL = "SELECT CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID('[%s].[%s]')) AS [min_valid_version]";
   private static Logger log = LoggerFactory.getLogger(MsSqlTableMetadataProvider.class);
   final static String PRIMARY_KEY_SQL =
       "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE " +
@@ -201,47 +202,69 @@ class MsSqlTableMetadataProvider extends CachingTableMetadataProvider {
 
     if (null != offset && !offset.isEmpty()) {
       log.trace("{}: Returning offset from local cache.", changeKey);
-      return offset;
+    } else {
+      log.trace("{}: Checking kafka for offset.", changeKey);
+
+      Map<String, Object> sourcePartition = Change.sourcePartition(changeKey);
+      offset = this.offsetStorageReader.offset(sourcePartition);
+
+      if (null != offset && !offset.isEmpty()) {
+        log.trace("{}: Retrieved offset from offsetStorageReader.", changeKey);
+        return offset;
+      }
     }
 
-    log.trace("{}: Checking kafka for offset.", changeKey);
-
-    Map<String, Object> sourcePartition = Change.sourcePartition(changeKey);
-    offset = this.offsetStorageReader.offset(sourcePartition);
-
-    if (null != offset && !offset.isEmpty()) {
-      log.trace("{}: Retrieved offset from offsetStorageReader.", changeKey);
-      return offset;
+    if (null != offset) {
+      log.trace("{}: Validating retrieved offset {} against min_valid_version.", changeKey, offset);
+      final long minValidVersion = minValidTrackingVersion(changeKey);
+      log.trace("{}: Retrieved min_valid_version from database {}", changeKey, minValidVersion);
+      if (MsSqlChange.offset(offset) > minValidVersion)
+        return offset;
     }
 
     log.trace("{}: Querying database for offset.", changeKey);
 
+    offset = MsSqlChange.offset(currentTrackingVersion(changeKey), true);
+
+    return offset;
+  }
+
+  public long minValidTrackingVersion(ChangeKey changeKey) throws SQLException {
     PooledConnection pooledConnection = null;
+    long minValidVersion;
     try {
       pooledConnection = JdbcUtils.openPooledConnection(this.config, changeKey);
-      try (PreparedStatement statement = pooledConnection.getConnection().prepareStatement(OFFSET_SQL)) {
-        statement.setString(1, changeKey.schemaName);
-        statement.setString(2, changeKey.tableName);
+      final String sql = String.format(MIN_VALID_VERSION_SQL, changeKey.schemaName, changeKey.tableName);
+      try (PreparedStatement statement = pooledConnection.getConnection().prepareStatement(sql)) {
         try (ResultSet resultSet = statement.executeQuery()) {
-          while (resultSet.next()) {
-            final long minValidVersion = resultSet.getLong("min_valid_version");
-            Preconditions.checkState(
-                !resultSet.wasNull(),
-                "resultSet did not returned a null for min_valid_version of %s", changeKey
-            );
-            log.trace("{}: Found min_valid_version of {}.", changeKey, minValidVersion);
-
-            offset = MsSqlChange.offset(minValidVersion);
-          }
+          resultSet.next();
+          minValidVersion = resultSet.getLong("min_valid_version");
+          log.trace("{}: Found min_valid_version of {}.", changeKey, minValidVersion);
         }
       }
     } finally {
       JdbcUtils.closeConnection(pooledConnection);
     }
-
-    return offset;
+    return minValidVersion;
   }
 
+  public long currentTrackingVersion(ChangeKey changeKey) throws SQLException {
+    PooledConnection pooledConnection = null;
+    long currentVersion;
+    try {
+      pooledConnection = JdbcUtils.openPooledConnection(this.config, changeKey);
+      try (PreparedStatement statement = pooledConnection.getConnection().prepareStatement(CURRENT_VERSION_SQL)) {
+        try (ResultSet resultSet = statement.executeQuery()) {
+          resultSet.next();
+          currentVersion = resultSet.getLong("current_version");
+          log.trace("{}: Found current_version of {}.", changeKey, currentVersion);
+        }
+      }
+    } finally {
+      JdbcUtils.closeConnection(pooledConnection);
+    }
+    return currentVersion;
+  }
 
   static class MsSqlTableMetadata implements TableMetadata {
     final String databaseName;

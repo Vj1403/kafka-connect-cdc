@@ -111,33 +111,39 @@ class QueryService extends AbstractExecutionThreadService {
       Map<String, Object> sourcePartition = Change.sourcePartition(changeKey);
       Map<String, Object> startOffset = this.tableMetadataProvider.startOffset(changeKey);
       long offset = MsSqlChange.offset(startOffset);
+      boolean initialDataSync = MsSqlChange.initialDataSync(startOffset);
 
       log.trace("{}: Starting at offset {} ", changeKey, offset);
 
-      try (PreparedStatement statement = queryBuilder.changeTrackingStatement(tableMetadata)) {
-        statement.setLong(1, offset);
-
+      try (PreparedStatement statement = initialDataSync ?
+              queryBuilder.initializationStatement(tableMetadata) :
+              queryBuilder.changeTrackingStatement(tableMetadata, offset)) {
         long count = 0;
 
         try (ResultSet resultSet = statement.executeQuery()) {
 
-          long changeVersion = 0;
           while (resultSet.next()) {
-            changeVersion = resultSet.getLong("__metadata_sys_change_version");
+            long changeVersion = resultSet.getLong("__metadata_sys_change_version");
 
             log.trace("{}: __metadata_sys_change_version = {}", changeKey, changeVersion);
 
             MsSqlChange.Builder builder = MsSqlChange.builder();
             MsSqlChange change = builder.build(tableMetadata, resultSet, this.time);
             change.sourcePartition = sourcePartition;
-            change.sourceOffset = MsSqlChange.offset(changeVersion);
+            change.sourceOffset = MsSqlChange.offset(changeVersion, initialDataSync);
             changeWriter.addChange(change);
+
             this.tableMetadataProvider.cacheOffset(changeKey, change.sourceOffset);
             count++;
           }
         }
 
         log.info("{}: Processed {} record(s).", changeKey, count);
+
+        if (initialDataSync) {
+          log.trace("{}: Initial sync completed, next offset {} ", changeKey, offset);
+          this.tableMetadataProvider.cacheOffset(changeKey, MsSqlChange.offset(offset, false));
+        }
 
       }
     } finally {

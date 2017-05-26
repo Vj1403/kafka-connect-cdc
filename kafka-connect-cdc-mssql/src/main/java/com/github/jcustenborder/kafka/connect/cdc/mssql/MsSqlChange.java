@@ -51,9 +51,10 @@ class MsSqlChange implements Change {
     return new Builder();
   }
 
-  public static Map<String, Object> offset(long changeVersion) {
+  public static Map<String, Object> offset(long changeVersion, boolean initialSync) {
     return ImmutableMap.of(
-        "sys_change_version", (Object) changeVersion
+        "sys_change_version", (Object) changeVersion,
+        "sys_change_initial_data_sync", (Object) initialSync
     );
   }
 
@@ -62,6 +63,14 @@ class MsSqlChange implements Change {
     Long changeVersion = (Long) sourceOffset.get("sys_change_version");
     Preconditions.checkNotNull(changeVersion, "sourceOffset[\"sys_change_version\"] cannot be null.");
     return changeVersion;
+  }
+
+  public static Boolean initialDataSync(Map<String, Object> sourceOffset) {
+    Preconditions.checkNotNull(sourceOffset, "sourceOffset cannot be null.");
+    Boolean initialDataSync = (Boolean) sourceOffset.get("sys_change_initial_data_sync");
+    if (initialDataSync == null)
+      initialDataSync = false;
+    return initialDataSync;
   }
 
   @Override

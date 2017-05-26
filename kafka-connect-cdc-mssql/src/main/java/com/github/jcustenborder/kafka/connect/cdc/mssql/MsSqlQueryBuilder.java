@@ -91,7 +91,8 @@ class MsSqlQueryBuilder {
             "FROM [%s].[%s] AS [u] " +
             "RIGHT OUTER JOIN " +
             "CHANGETABLE(CHANGES [%s].[%s], ?) AS [ct] " +
-            "ON %s",
+            "ON %s " +
+            "ORDER BY [ct].[sys_change_version]",
         tableMetadata.schemaName(),
         tableMetadata.tableName(),
         tableMetadata.schemaName(),
@@ -102,12 +103,41 @@ class MsSqlQueryBuilder {
     return sql;
   }
 
+  String initializationStatementQuery(TableMetadataProvider.TableMetadata tableMetadata) {
+    Preconditions.checkState(
+            tableMetadata.keyColumns().size() > 0,
+            "Table([%s].[%s]) must have at least one primary key column.",
+            tableMetadata.schemaName(),
+            tableMetadata.tableName()
+    );
+
+    final String sql = String.format("" +
+                    "DECLARE @current_version BIGINT " +
+                    "SET @current_version = CHANGE_TRACKING_CURRENT_VERSION() " +
+                    "SELECT " +
+                    "@current_version AS [__metadata_sys_change_version], " +
+                    "0 AS [__metadata_sys_change_creation_version], " +
+                    "'I' AS [__metadata_sys_change_operation], " +
+                    "u.* " +
+                    "FROM [%s].[%s] AS [u]",
+            tableMetadata.schemaName(), tableMetadata.tableName());
+    log.trace("initializationStatementQuery() - sql:\n{}", sql);
+    return sql;
+  }
+
   public PreparedStatement listChangeTrackingTablesStatement() throws SQLException {
     return this.connection.prepareStatement(LIST_CHANGE_TRACKING_TABLES_SQL);
   }
 
-  public PreparedStatement changeTrackingStatement(TableMetadataProvider.TableMetadata tableMetadata) throws SQLException {
+  public PreparedStatement changeTrackingStatement(TableMetadataProvider.TableMetadata tableMetadata, long offset) throws SQLException {
     final String sql = changeTrackingStatementQuery(tableMetadata);
+    PreparedStatement statement = this.connection.prepareStatement(sql);
+    statement.setLong(1, offset);
+    return statement;
+  }
+
+  public PreparedStatement initializationStatement(TableMetadataProvider.TableMetadata tableMetadata) throws SQLException {
+    final String sql = initializationStatementQuery(tableMetadata);
     return this.connection.prepareStatement(sql);
   }
 }

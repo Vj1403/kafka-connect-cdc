@@ -78,7 +78,7 @@ public class MsSqlSourceConnector extends CDCSourceConnector {
               "FROM sys.change_tracking_tables tr " +
               "INNER JOIN sys.tables t ON t.object_id = tr.object_id " +
               "INNER JOIN sys.schemas s ON s.schema_id = t.schema_id " +
-              "WHERE tr.is_track_columns_updated_on = 1";
+              "WHERE tr.is_track_columns_updated_on = 1"; //TODO: why is_track_columns_updated_on = 1 here?
 
           List<String> tables = new ArrayList<>(1024);
           try (Statement statement = connection.createStatement()) {
